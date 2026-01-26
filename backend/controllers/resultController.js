@@ -58,24 +58,27 @@ const saveResult = asyncHandler(async (req, res) => {
 const getResultsByExamId = asyncHandler(async (req, res) => {
   const { examId } = req.params;
 
-  // Get MCQ results
   const results = await Result.find({ examId })
     .populate("userId", "name email")
+    .populate("examId", "examName")
     .sort({ createdAt: -1 });
 
-  // Get coding questions and submissions
   const codingQuestions = await CodingQuestion.find({ examId }).populate(
     "submittedAnswer"
   );
 
-  // Combine MCQ and coding results
   const combinedResults = results.map((result) => {
+    if (!result.userId) return null;
+
     const studentCodingSubmissions = codingQuestions
-      .filter(
-        (q) =>
+      .filter((q) => {
+        return (
           q.submittedAnswer &&
-          q.submittedAnswer.userId?.toString() === result.userId._id.toString()
-      )
+          q.submittedAnswer.userId &&
+          q.submittedAnswer.userId.toString() ===
+            result.userId._id.toString()
+        );
+      })
       .map((q) => ({
         question: q.question,
         code: q.submittedAnswer.code,
@@ -92,9 +95,10 @@ const getResultsByExamId = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     success: true,
-    data: combinedResults,
+    data: combinedResults.filter(Boolean),
   });
 });
+
 
 // @desc    Get results for current user
 // @route   GET /api/results/user
@@ -158,29 +162,32 @@ const toggleResultVisibility = asyncHandler(async (req, res) => {
 // @route   GET /api/results/all
 // @access  Private (Teacher only)
 const getAllResults = asyncHandler(async (req, res) => {
-  // Check if user is a teacher
   if (req.user.role !== "teacher") {
     res.status(403);
-    throw new Error("Not authorized to view all results");
+    throw new Error("Not authorized");
   }
 
   const results = await Result.find()
     .populate("userId", "name email")
+    .populate("examId", "examName")
     .sort({ createdAt: -1 });
 
-  // Get coding questions and submissions
   const codingQuestions = await CodingQuestion.find().populate(
     "submittedAnswer"
   );
 
-  // Combine MCQ and coding results
   const combinedResults = results.map((result) => {
+    if (!result.userId) return null;
+
     const studentCodingSubmissions = codingQuestions
-      .filter(
-        (q) =>
+      .filter((q) => {
+        return (
           q.submittedAnswer &&
-          q.submittedAnswer.userId?.toString() === result.userId._id.toString()
-      )
+          q.submittedAnswer.userId &&
+          q.submittedAnswer.userId.toString() ===
+            result.userId._id.toString()
+        );
+      })
       .map((q) => ({
         question: q.question,
         code: q.submittedAnswer.code,
@@ -197,9 +204,10 @@ const getAllResults = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     success: true,
-    data: combinedResults,
+    data: combinedResults.filter(Boolean),
   });
 });
+
 
 export {
   saveResult,
