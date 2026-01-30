@@ -7,34 +7,37 @@ const YAMNET_MODEL_URL =
 const VAD_THRESHOLD = 0.006;   // energy threshold
 const VAD_HOLD_FRAMES = 2;    // consecutive frames required
 
-
 export default function useBackgroundVoiceDetection({
   checkAndUpdateViolation,
-  isExamTerminated,
-  isExamStarted
+  isExamStarted,
+  isExamTerminated
 }) {
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
   const bufferRef = useRef(null);
   const modelRef = useRef(null);
 
-  const speechFramesRef = useRef(0);
   const lastInferenceTimeRef = useRef(0);
-
   const vadFramesRef = useRef(0);
   const speechStartTimeRef = useRef(null);
 
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
 
-
+  // ======================================================
+  // 🔊 START / STOP EXACTLY LIKE FACE DETECTION
+  // ======================================================
   useEffect(() => {
-    if (isExamTerminated) return;
+    // 🚫 Do nothing until exam starts
+    if (!isExamStarted || isExamTerminated) return;
 
-    let stream;
+    let cancelled = false;
 
     const init = async () => {
       try {
-        // 1️⃣ Mic access
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // 🎤 Mic access
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        streamRef.current = stream;
 
         const audioContext = new AudioContext({ sampleRate: 16000 });
         audioContextRef.current = audioContext;
@@ -48,126 +51,126 @@ export default function useBackgroundVoiceDetection({
 
         source.connect(analyser);
 
-        // 2️⃣ Load YAMNet ONCE
+        // 🧠 Load YAMNet ONCE per exam
         modelRef.current = await tf.loadGraphModel(
           YAMNET_MODEL_URL,
           { fromTFHub: true }
         );
 
-        console.log('✅ YAMNet model loaded');
+        console.log('✅ YAMNet voice model loaded');
 
         detectLoop();
       } catch (err) {
-        console.error('🎤 Audio init failed:', err);
+        console.error('🎤 Voice detection init failed:', err);
       }
     };
 
     const detectLoop = async () => {
       if (
+        cancelled ||
+        !isExamStarted ||
+        isExamTerminated ||
         !analyserRef.current ||
-        !modelRef.current ||
-        isExamTerminated
+        !modelRef.current
       ) {
-        requestAnimationFrame(detectLoop);
         return;
+      }
+
+      // 🔄 Resume audio if browser suspended it
+      if (audioContextRef.current?.state === 'suspended') {
+        await audioContextRef.current.resume();
       }
 
       const now = Date.now();
       if (now - lastInferenceTimeRef.current < 1000) {
-        requestAnimationFrame(detectLoop);
+        rafRef.current = requestAnimationFrame(detectLoop);
         return;
       }
       lastInferenceTimeRef.current = now;
 
       analyserRef.current.getFloatTimeDomainData(bufferRef.current);
 
-      // 3️⃣ Voice Activity Detection (RMS)
+      // 🔊 RMS energy (VAD)
       let energy = 0;
       for (let i = 0; i < bufferRef.current.length; i++) {
         energy += bufferRef.current[i] ** 2;
       }
       const rms = Math.sqrt(energy / bufferRef.current.length);
-      console.log('RMS:', rms.toFixed(4));
 
-
-      // 🔊 Energy-based VAD (Problem 4)
-        if (rms > VAD_THRESHOLD) {
+      if (rms > VAD_THRESHOLD) {
         vadFramesRef.current += 1;
-        } else {
+      } else {
         vadFramesRef.current = 0;
-        speechFramesRef.current = 0;
-        requestAnimationFrame(detectLoop);
+        speechStartTimeRef.current = null;
+        rafRef.current = requestAnimationFrame(detectLoop);
         return;
-        }
+      }
 
-        // Require sustained sound before AI inference
-        if (vadFramesRef.current < VAD_HOLD_FRAMES) {
-        requestAnimationFrame(detectLoop);
+      if (vadFramesRef.current < VAD_HOLD_FRAMES) {
+        rafRef.current = requestAnimationFrame(detectLoop);
         return;
-        }
+      }
 
-
-      // 4️⃣ AI inference (CORRECT WAY)
+      // 🧠 AI inference
       const waveform = tf.tensor1d(bufferRef.current);
-
       const outputs = modelRef.current.predict(waveform);
-      const scoresTensor = outputs[0]; // FIRST tensor = scores
-
+      const scoresTensor = outputs[0];
       const scores = await scoresTensor.data();
 
-      // Cleanup
       outputs.forEach(t => t.dispose());
       waveform.dispose();
 
-      // 5️⃣ Speech decision
-      const speechScore = Math.max(scores[0], scores[1]); // speech, conversation
+      const speechScore = Math.max(scores[0], scores[1]); // speech / conversation
 
-      // ⏱️ Time-based sustained speech detection (FIXED LOGIC)
       if (speechScore > 0.6) {
         if (!speechStartTimeRef.current) {
           speechStartTimeRef.current = now;
         }
 
-        const speechDuration = now - speechStartTimeRef.current;
-        console.log('🗣 Speech duration (ms):', speechDuration);
+        const duration = now - speechStartTimeRef.current;
 
-        // 🔔 1500 ms continuous speech → violation
-        if (speechDuration >= 1500) {
-          console.log('🔊 Background voice detected');
-
+        if (duration >= 1500) {
           checkAndUpdateViolation(
             'backgroundVoice',
             true,
             'Background Voice Detected'
           );
-
-          // reset after violation
           speechStartTimeRef.current = null;
         }
       } else {
-        // reset if speech breaks
         speechStartTimeRef.current = null;
       }
 
-      requestAnimationFrame(detectLoop);
-
+      rafRef.current = requestAnimationFrame(detectLoop);
     };
 
     init();
 
+    // ======================================================
+    // CLEANUP (LIKE FACE DETECTION)
+    // ======================================================
     return () => {
-        if (stream) {
-            stream.getTracks().forEach(track => track.stop());
-        }
+      cancelled = true;
 
-        if (
-            audioContextRef.current &&
-            audioContextRef.current.state !== 'closed'
-        ) {
-            audioContextRef.current.close();
-        }
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+      }
+
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+      }
+
+      if (
+        audioContextRef.current &&
+        audioContextRef.current.state !== 'closed'
+      ) {
+        audioContextRef.current.close();
+        audioContextRef.current = null;
+      }
+
+      analyserRef.current = null;
+      modelRef.current = null;
     };
-
-  }, [checkAndUpdateViolation, isExamTerminated]);
+  }, [isExamStarted, isExamTerminated, checkAndUpdateViolation]);
 }
-

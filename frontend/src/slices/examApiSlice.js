@@ -1,34 +1,31 @@
 import { apiSlice } from './apiSlice';
 
-// Define the base URL for the exams API
 const EXAMS_URL = '/api/exam';
 
-// Inject endpoints for the exam slice
 export const examApiSlice = apiSlice.injectEndpoints({
   endpoints: (builder) => ({
-    // Get all exams
     getExams: builder.query({
       query: () => ({
-        url: `${EXAMS_URL}`,
+        url: EXAMS_URL,
         method: 'GET',
       }),
     }),
-    // Create a new exam
+
     createExam: builder.mutation({
       query: (data) => ({
-        url: `${EXAMS_URL}`,
+        url: EXAMS_URL,
         method: 'POST',
         body: data,
       }),
     }),
-    // Get questions for a specific exam
+
     getQuestions: builder.query({
       query: (examId) => ({
         url: `${EXAMS_URL}/questions/${examId}`,
         method: 'GET',
       }),
     }),
-    // Create a new question for an exam
+
     createQuestion: builder.mutation({
       query: (data) => ({
         url: `${EXAMS_URL}/questions`,
@@ -37,22 +34,29 @@ export const examApiSlice = apiSlice.injectEndpoints({
       }),
     }),
 
-    //Delete an exam
     deleteExam: builder.mutation({
       query: (examId) => ({
         url: `${EXAMS_URL}/${examId}`,
+        method: 'DELETE',
+      }),
+    }),
+
+    // 🔐 VALIDATE EXAM KEY
+    validateExamKey: builder.mutation({
+      query: (data) => ({
+        url: `${EXAMS_URL}/validate-key`,
         method: 'POST',
-        credentials: 'include',
+        body: data,
       }),
     }),
   }),
 });
 
-// Export the generated hooks for each endpoint
 export const {
   useGetExamsQuery,
   useCreateExamMutation,
   useGetQuestionsQuery,
   useCreateQuestionMutation,
   useDeleteExamMutation,
+  useValidateExamKeyMutation,
 } = examApiSlice;

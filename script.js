@@ -1,6 +1,5 @@
-// using for loops
-let i;
- for(i=1;i<=10;i++){
-    console.log(i)
- }
+// use for loop
+
+for i in range(0,11):
+    print(i);
 // Write your code here...

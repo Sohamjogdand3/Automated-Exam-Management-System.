@@ -7,6 +7,7 @@ import { Box, Card } from '@mui/material';
 import swal from 'sweetalert';
 import { UploadClient } from '@uploadcare/upload-client';
 import useBackgroundVoiceDetection from './useBackgroundVoiceDetection';
+import useBrowserLock from './useBrowserLock';
 
 const client = new UploadClient({ publicKey: 'e69ab6e5db6d4a41760b' });
 
@@ -21,6 +22,13 @@ export default function Home({
 
   const [lastDetectionTime, setLastDetectionTime] = useState({});
   const [isExamTerminated, setIsExamTerminated] = useState(false);
+  const [examStarted, setExamStarted] = useState(false);
+
+  useEffect(() => {
+    setExamStarted(true);
+  }, []);
+
+
 
   // ✅ Central violation counters (UNCHANGED)
   const countsRef = useRef({
@@ -28,7 +36,12 @@ export default function Home({
     multipleFaceCount: 0,
     cellPhoneCount: 0,
     prohibitedObjectCount: 0,
-    backgroundVoiceCount: 0
+    backgroundVoiceCount: 0,
+    
+    tabSwitchCount: 0,
+    windowBlurCount: 0,
+    shortcutKeyCount: 0,
+    fullscreenExitCount: 0
   });
 
   // ======================================================
@@ -87,6 +100,16 @@ export default function Home({
     checkAndUpdateViolation,
     isExamTerminated,
     isExamStarted   // ✅ KEY FIX
+  });
+
+
+  // ===============================
+  // 🔒 BROWSER LOCK
+  // ===============================
+  useBrowserLock({
+    isExamStarted,
+    isExamTerminated,
+    checkAndUpdateViolation
   });
 
   // ======================================================
