@@ -4,8 +4,10 @@ import * as tf from '@tensorflow/tfjs';
 const YAMNET_MODEL_URL =
   'https://tfhub.dev/google/tfjs-model/yamnet/tfjs/1';
 
-const VAD_THRESHOLD = 0.006;   // energy threshold
-const VAD_HOLD_FRAMES = 2;    // consecutive frames required
+const SAMPLE_RATE = 16000;
+const FRAME_SIZE = 15600; // required by YAMNet
+const SPEECH_SCORE_THRESHOLD = 0.6;
+const SPEECH_DURATION_MS = 1500;
 
 export default function useBackgroundVoiceDetection({
   checkAndUpdateViolation,
@@ -13,152 +15,105 @@ export default function useBackgroundVoiceDetection({
   isExamTerminated
 }) {
   const audioContextRef = useRef(null);
-  const analyserRef = useRef(null);
-  const bufferRef = useRef(null);
+  const processorRef = useRef(null);
   const modelRef = useRef(null);
-
-  const lastInferenceTimeRef = useRef(0);
-  const vadFramesRef = useRef(0);
-  const speechStartTimeRef = useRef(null);
-
   const streamRef = useRef(null);
-  const rafRef = useRef(null);
 
-  // ======================================================
-  // 🔊 START / STOP EXACTLY LIKE FACE DETECTION
-  // ======================================================
+  const bufferRef = useRef([]);
+  const speechStartRef = useRef(null);
+  const cancelledRef = useRef(false);
+
   useEffect(() => {
-    // 🚫 Do nothing until exam starts
     if (!isExamStarted || isExamTerminated) return;
 
-    let cancelled = false;
+    cancelledRef.current = false;
 
     const init = async () => {
       try {
-        // 🎤 Mic access
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        streamRef.current = stream;
+        // ✅ Ensure TF is ready
+        await tf.ready();
 
-        const audioContext = new AudioContext({ sampleRate: 16000 });
-        audioContextRef.current = audioContext;
-
-        const source = audioContext.createMediaStreamSource(stream);
-        const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 2048;
-
-        analyserRef.current = analyser;
-        bufferRef.current = new Float32Array(analyser.fftSize);
-
-        source.connect(analyser);
-
-        // 🧠 Load YAMNet ONCE per exam
+        console.log('🔄 Loading YAMNet model...');
         modelRef.current = await tf.loadGraphModel(
           YAMNET_MODEL_URL,
           { fromTFHub: true }
         );
-
         console.log('✅ YAMNet voice model loaded');
 
-        detectLoop();
+        // 🎤 Mic access
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        streamRef.current = stream;
+
+        const audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+        audioContextRef.current = audioContext;
+
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+
+        const source = audioContext.createMediaStreamSource(stream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+        processorRef.current = processor;
+
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+
+        processor.onaudioprocess = async (event) => {
+          if (
+            cancelledRef.current ||
+            !modelRef.current ||
+            isExamTerminated
+          ) return;
+
+          const input = event.inputBuffer.getChannelData(0);
+          bufferRef.current.push(...input);
+
+          if (bufferRef.current.length < FRAME_SIZE) return;
+
+          const audioSlice = bufferRef.current.slice(0, FRAME_SIZE);
+          bufferRef.current = bufferRef.current.slice(FRAME_SIZE);
+
+          // ✅ FIX 1: YAMNet expects 1D tensor (NO reshape)
+          const waveform = tf.tensor1d(audioSlice);
+
+          const outputs = modelRef.current.predict(waveform);
+          const scores = await outputs[0].data();
+
+          tf.dispose([waveform, ...outputs]);
+
+          const speechScore = Math.max(scores[0], scores[1]);
+
+          if (speechScore > SPEECH_SCORE_THRESHOLD) {
+            if (!speechStartRef.current) {
+              speechStartRef.current = Date.now();
+            }
+
+            if (Date.now() - speechStartRef.current >= SPEECH_DURATION_MS) {
+              checkAndUpdateViolation(
+                'backgroundVoice',
+                true,
+                'Background voice detected'
+              );
+              speechStartRef.current = null;
+            }
+          } else {
+            speechStartRef.current = null;
+          }
+        };
       } catch (err) {
-        console.error('🎤 Voice detection init failed:', err);
+        console.error('❌ Voice detection init failed:', err);
       }
-    };
-
-    const detectLoop = async () => {
-      if (
-        cancelled ||
-        !isExamStarted ||
-        isExamTerminated ||
-        !analyserRef.current ||
-        !modelRef.current
-      ) {
-        return;
-      }
-
-      // 🔄 Resume audio if browser suspended it
-      if (audioContextRef.current?.state === 'suspended') {
-        await audioContextRef.current.resume();
-      }
-
-      const now = Date.now();
-      if (now - lastInferenceTimeRef.current < 1000) {
-        rafRef.current = requestAnimationFrame(detectLoop);
-        return;
-      }
-      lastInferenceTimeRef.current = now;
-
-      analyserRef.current.getFloatTimeDomainData(bufferRef.current);
-
-      // 🔊 RMS energy (VAD)
-      let energy = 0;
-      for (let i = 0; i < bufferRef.current.length; i++) {
-        energy += bufferRef.current[i] ** 2;
-      }
-      const rms = Math.sqrt(energy / bufferRef.current.length);
-
-      if (rms > VAD_THRESHOLD) {
-        vadFramesRef.current += 1;
-      } else {
-        vadFramesRef.current = 0;
-        speechStartTimeRef.current = null;
-        rafRef.current = requestAnimationFrame(detectLoop);
-        return;
-      }
-
-      if (vadFramesRef.current < VAD_HOLD_FRAMES) {
-        rafRef.current = requestAnimationFrame(detectLoop);
-        return;
-      }
-
-      // 🧠 AI inference
-      const waveform = tf.tensor1d(bufferRef.current);
-      const outputs = modelRef.current.predict(waveform);
-      const scoresTensor = outputs[0];
-      const scores = await scoresTensor.data();
-
-      outputs.forEach(t => t.dispose());
-      waveform.dispose();
-
-      const speechScore = Math.max(scores[0], scores[1]); // speech / conversation
-
-      if (speechScore > 0.6) {
-        if (!speechStartTimeRef.current) {
-          speechStartTimeRef.current = now;
-        }
-
-        const duration = now - speechStartTimeRef.current;
-
-        if (duration >= 1500) {
-          checkAndUpdateViolation(
-            'backgroundVoice',
-            true,
-            'Background Voice Detected'
-          );
-          speechStartTimeRef.current = null;
-        }
-      } else {
-        speechStartTimeRef.current = null;
-      }
-
-      rafRef.current = requestAnimationFrame(detectLoop);
     };
 
     init();
 
-    // ======================================================
-    // CLEANUP (LIKE FACE DETECTION)
-    // ======================================================
+    // ================= CLEANUP =================
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
 
-      if (rafRef.current) {
-        cancelAnimationFrame(rafRef.current);
-      }
-
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(t => t.stop());
-        streamRef.current = null;
+      if (processorRef.current) {
+        processorRef.current.disconnect();
+        processorRef.current = null;
       }
 
       if (
@@ -169,8 +124,13 @@ export default function useBackgroundVoiceDetection({
         audioContextRef.current = null;
       }
 
-      analyserRef.current = null;
-      modelRef.current = null;
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+      }
+
+      bufferRef.current = [];
+      speechStartRef.current = null;
     };
   }, [isExamStarted, isExamTerminated, checkAndUpdateViolation]);
 }

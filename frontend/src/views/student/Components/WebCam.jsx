@@ -5,39 +5,39 @@ import Webcam from 'react-webcam';
 import { drawRect } from './utilities';
 import { Box, Card } from '@mui/material';
 import swal from 'sweetalert';
-import { UploadClient } from '@uploadcare/upload-client';
 import useBackgroundVoiceDetection from './useBackgroundVoiceDetection';
 import useBrowserLock from './useBrowserLock';
-
-const client = new UploadClient({ publicKey: 'e69ab6e5db6d4a41760b' });
+import * as faceMesh from '@mediapipe/face_mesh';
 
 export default function Home({
   cheatingLog,
   updateCheatingLog,
-  isExamStarted   // ✅ NEW PROP
+  isExamStarted
 }) {
   const navigate = useNavigate();
+
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
 
+  const faceMeshRef = useRef(null);
+  const gazeStartRef = useRef(null);
+  const lastGazeViolationRef = useRef(0);
+  const animationFrameRef = useRef(null);
+
   const [lastDetectionTime, setLastDetectionTime] = useState({});
   const [isExamTerminated, setIsExamTerminated] = useState(false);
-  const [examStarted, setExamStarted] = useState(false);
 
-  useEffect(() => {
-    setExamStarted(true);
-  }, []);
-
-
-
-  // ✅ Central violation counters (UNCHANGED)
+  // ======================================================
+  // CENTRAL COUNTERS
+  // ======================================================
   const countsRef = useRef({
     noFaceCount: 0,
     multipleFaceCount: 0,
     cellPhoneCount: 0,
     prohibitedObjectCount: 0,
     backgroundVoiceCount: 0,
-    
+    gazeAwayCount: 0,
+
     tabSwitchCount: 0,
     windowBlurCount: 0,
     shortcutKeyCount: 0,
@@ -45,67 +45,52 @@ export default function Home({
   });
 
   // ======================================================
-  // ✅ SINGLE VIOLATION ENGINE (SOURCE OF TRUTH)
+  // SINGLE VIOLATION ENGINE
   // ======================================================
   const checkAndUpdateViolation = async (type, condition, message) => {
     const now = Date.now();
-    if (isExamTerminated) return false;
+    if (isExamTerminated) return;
 
-    if (condition && now - (lastDetectionTime[type] || 0) >= 3000) {
+    if (condition && now - (lastDetectionTime[type] || 0) >= 5000) {
       setLastDetectionTime(prev => ({ ...prev, [type]: now }));
-
       countsRef.current[`${type}Count`]++;
 
       const totalViolations = Object.values(countsRef.current)
-        .reduce((sum, count) => sum + count, 0);
+        .reduce((a, b) => a + b, 0);
 
-      const updateObj = {
+      updateCheatingLog({
         ...cheatingLog,
-        noFaceCount: countsRef.current.noFaceCount,
-        multipleFaceCount: countsRef.current.multipleFaceCount,
-        cellPhoneCount: countsRef.current.cellPhoneCount,
-        prohibitedObjectCount: countsRef.current.prohibitedObjectCount,
-        backgroundVoiceCount: countsRef.current.backgroundVoiceCount
-      };
-
-      updateCheatingLog(updateObj);
+        ...countsRef.current
+      });
 
       if (totalViolations >= 5) {
         setIsExamTerminated(true);
         await swal({
           title: 'Exam Terminated',
-          text: 'You have reached 5 violations.',
-          icon: 'error',
-          buttons: { confirm: 'OK' }
+          text: 'You reached 5 violations.',
+          icon: 'error'
         });
         navigate('/');
-        return true;
+        return;
       }
 
       swal(
         message,
-        `Violation #${countsRef.current[`${type}Count`]} (Total: ${totalViolations}/5)`,
+        `Violation ${countsRef.current[`${type}Count`]} (Total ${totalViolations}/5)`,
         'warning'
       );
-
-      return true;
     }
-    return false;
   };
 
   // ======================================================
-  // 🔊 BACKGROUND VOICE DETECTION (GATED)
+  // BACKGROUND VOICE + BROWSER LOCK
   // ======================================================
   useBackgroundVoiceDetection({
     checkAndUpdateViolation,
     isExamTerminated,
-    isExamStarted   // ✅ KEY FIX
+    isExamStarted
   });
 
-
-  // ===============================
-  // 🔒 BROWSER LOCK
-  // ===============================
   useBrowserLock({
     isExamStarted,
     isExamTerminated,
@@ -113,47 +98,126 @@ export default function Home({
   });
 
   // ======================================================
-  // 🎥 VISION AI (UNCHANGED)
+  // 👁️ EYE TRACKING INITIALIZATION
+  // ======================================================
+  useEffect(() => {
+    faceMeshRef.current = new faceMesh.FaceMesh({
+      locateFile: file =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+
+    faceMeshRef.current.setOptions({
+      maxNumFaces: 1,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    faceMeshRef.current.onResults(handleEyeResults);
+    startEyeTrackingLoop();
+
+    return () => cancelAnimationFrame(animationFrameRef.current);
+  }, []);
+
+  // ======================================================
+  // 👁️ EYE TRACKING LOGIC (STABLE + FAIR)
+  // ======================================================
+  const handleEyeResults = results => {
+    if (!results.multiFaceLandmarks?.length) {
+      gazeStartRef.current = null;
+      return;
+    }
+
+    const lm = results.multiFaceLandmarks[0];
+
+    const left = lm[33];
+    const right = lm[133];
+
+    const eyeWidth = Math.abs(right.x - left.x);
+    if (eyeWidth === 0) return;
+
+    const movementRatio = Math.abs(left.x - right.x) / eyeWidth;
+    const now = Date.now();
+
+    const SOFT_IGNORE = 0.55;
+    const HARD_SUSPICIOUS = 0.75;
+
+    if (movementRatio > HARD_SUSPICIOUS) {
+      if (!gazeStartRef.current) gazeStartRef.current = now;
+
+      if (
+        now - gazeStartRef.current > 3000 &&       // must hold 3s
+        now - lastGazeViolationRef.current > 10000 // 10s cooldown
+      ) {
+        lastGazeViolationRef.current = now;
+
+        checkAndUpdateViolation(
+          'gazeAway',
+          true,
+          'Sustained Eye Movement Detected'
+        );
+      }
+    } else if (movementRatio < SOFT_IGNORE) {
+      gazeStartRef.current = null;
+    }
+  };
+
+  // ======================================================
+  // 👁️ CONTINUOUS FACEMESH LOOP
+  // ======================================================
+  const startEyeTrackingLoop = async () => {
+    if (
+      webcamRef.current &&
+      webcamRef.current.video &&
+      webcamRef.current.video.readyState === 4
+    ) {
+      await faceMeshRef.current.send({
+        image: webcamRef.current.video
+      });
+    }
+    animationFrameRef.current = requestAnimationFrame(startEyeTrackingLoop);
+  };
+
+  // ======================================================
+  // 🎥 COCO-SSD OBJECT DETECTION (UNCHANGED)
   // ======================================================
   const runCoco = async () => {
     const net = await cocossd.load();
     setInterval(() => detect(net), 1000);
   };
 
-  const detect = async (net) => {
+  const detect = async net => {
     if (
       webcamRef.current &&
       webcamRef.current.video &&
       webcamRef.current.video.readyState === 4
     ) {
       const video = webcamRef.current.video;
-      const videoWidth = video.videoWidth;
-      const videoHeight = video.videoHeight;
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
 
-      webcamRef.current.video.width = videoWidth;
-      webcamRef.current.video.height = videoHeight;
-      canvasRef.current.width = videoWidth;
-      canvasRef.current.height = videoHeight;
+      canvasRef.current.width = vw;
+      canvasRef.current.height = vh;
 
-      const obj = await net.detect(video);
+      const objects = await net.detect(video);
       const ctx = canvasRef.current.getContext('2d');
-      ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-      drawRect(obj, ctx);
+      ctx.clearRect(0, 0, vw, vh);
+      drawRect(objects, ctx);
 
       let personCount = 0;
       let faceDetected = false;
 
-      obj.forEach(el => {
-        if (el.class === 'person') {
-          faceDetected = true;
+      objects.forEach(obj => {
+        if (obj.class === 'person') {
           personCount++;
+          faceDetected = true;
         }
 
-        if (el.class === 'cell phone') {
+        if (obj.class === 'cell phone') {
           checkAndUpdateViolation('cellPhone', true, 'Cell Phone Detected');
         }
 
-        if (el.class === 'book' || el.class === 'laptop') {
+        if (obj.class === 'book' || obj.class === 'laptop') {
           checkAndUpdateViolation(
             'prohibitedObject',
             true,
@@ -171,11 +235,7 @@ export default function Home({
       }
 
       if (!faceDetected) {
-        checkAndUpdateViolation(
-          'noFace',
-          true,
-          'Face Not Visible'
-        );
+        checkAndUpdateViolation('noFace', true, 'Face Not Visible');
       }
     }
   };
@@ -189,25 +249,16 @@ export default function Home({
   // ======================================================
   return (
     <Box>
-      <Card
-        variant="outlined"
-        sx={{ position: 'relative', width: '100%', height: '100%' }}
-      >
+      <Card sx={{ position: 'relative' }}>
         <Webcam
           ref={webcamRef}
-          audio={true}
-          muted={false}
-          screenshotFormat="image/jpeg"
+          audio
           videoConstraints={{
             width: 640,
             height: 480,
             facingMode: 'user'
           }}
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover'
-          }}
+          style={{ width: '100%', height: '100%' }}
         />
         <canvas
           ref={canvasRef}
@@ -215,8 +266,6 @@ export default function Home({
             position: 'absolute',
             top: 0,
             left: 0,
-            width: '100%',
-            height: '100%',
             zIndex: 10
           }}
         />

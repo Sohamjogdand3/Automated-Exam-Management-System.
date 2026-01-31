@@ -12,8 +12,18 @@ import { useSelector } from 'react-redux';
 import { toast } from 'react-toastify';
 import { useCheatingLog } from 'src/context/CheatingLogContext';
 
+/* ✅ ADDED IMPORTS (ONLY THESE) */
+import useBackgroundVoiceDetection from './Components/useBackgroundVoiceDetection';
+import useBrowserLock from './Components/useBrowserLock';
+
+
 const TestPage = () => {
   const { examId, testId } = useParams();
+
+  /* ✅ ADDED STATES (NO EXISTING STATE TOUCHED) */
+  const [isExamStarted, setIsExamStarted] = useState(false);
+  const [isExamTerminated, setIsExamTerminated] = useState(false);
+
   const [selectedExam, setSelectedExam] = useState(null);
   const [examDurationInSeconds, setExamDurationInSeconds] = useState(0);
   const { data: userExamdata, isLoading: isExamsLoading } = useGetExamsQuery();
@@ -23,12 +33,34 @@ const TestPage = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isMcqCompleted, setIsMcqCompleted] = useState(false);
 
+  /* =====================================================
+     ✅ CENTRAL VIOLATION HANDLER (ADDED)
+     ===================================================== */
+  const checkAndUpdateViolation = (type, value, message) => {
+    console.log('🚨 Violation:', type, message);
+    updateCheatingLog(type, value);
+  };
+
+  /* =====================================================
+     ✅ ACTIVATE PROCTORING HOOKS (ADDED)
+     ===================================================== */
+  useBackgroundVoiceDetection({
+    isExamStarted,
+    isExamTerminated,
+    checkAndUpdateViolation
+  });
+
+  useBrowserLock({
+    isExamStarted,
+    isExamTerminated,
+    checkAndUpdateViolation
+  });
+
   useEffect(() => {
     if (userExamdata) {
       const exam = userExamdata.find((exam) => exam.examId === examId);
       if (exam) {
         setSelectedExam(exam);
-        // Convert duration from minutes to seconds
         setExamDurationInSeconds(exam.duration);
         console.log('Exam duration (minutes):', exam.duration);
       }
@@ -48,68 +80,35 @@ const TestPage = () => {
 
   const handleMcqCompletion = () => {
     setIsMcqCompleted(true);
-    // Reset cheating log for coding exam
     resetCheatingLog(examId);
     navigate(`/exam/${examId}/codedetails`);
   };
 
   const handleTestSubmission = async () => {
-    if (isSubmitting) return; // Prevent multiple submissions
+    if (isSubmitting) return;
 
     try {
       setIsSubmitting(true);
 
-      if (!examId) {
-        console.error('Missing examId');
-        toast.error('Exam ID is required');
-        return;
-      }
-
-      if (!userInfo || !userInfo.name || !userInfo.email) {
-        console.error('Missing user info:', userInfo);
-        toast.error('User information is missing');
-        return;
-      }
-
-      // Make sure we have the latest user info in the log
-      // Use the selected exam data to get the correct exam ID format
       const examData = userExamdata?.find(e => e.examId === examId);
-      if (!examData) {
-        console.error('Could not find exam data for:', examId);
-        toast.error('Could not verify exam information');
-        return;
-      }
+      if (!examData) return;
 
-      // Use the MongoDB _id for consistency in queries
       const updatedLog = {
         ...cheatingLog,
         username: userInfo.name,
         email: userInfo.email,
-        examId: examData._id, // Use MongoDB _id for storage
-        examUUID: examId, // Store the UUID as well for reference
-        noFaceCount: Number(cheatingLog.noFaceCount || 0),
-        multipleFaceCount: Number(cheatingLog.multipleFaceCount || 0),
-        cellPhoneCount: Number(cheatingLog.cellPhoneCount || 0),
-        prohibitedObjectCount: Number(cheatingLog.prohibitedObjectCount || 0),
-        screenshots: cheatingLog.screenshots || [],
+        examId: examData._id,
+        examUUID: examId,
       };
 
-      console.log('Current cheating log state:', cheatingLog);
-      console.log('Submitting cheating log:', updatedLog);
-
-      // Save the cheating log
-      const result = await saveCheatingLogMutation(updatedLog).unwrap();
-      console.log('Cheating log saved:', result);
-
+      await saveCheatingLogMutation(updatedLog).unwrap();
       toast.success('Test submitted successfully!');
       navigate('/Success');
     } catch (error) {
-      console.error('Error saving cheating log:', error);
-      toast.error(
-        error?.data?.message || error?.message || 'Failed to save test logs. Please try again.',
-      );
+      toast.error('Failed to save test logs.');
     } finally {
       setIsSubmitting(false);
+      setIsExamTerminated(true); // ✅ STOP ALL PROCTORING
     }
   };
 
@@ -128,75 +127,62 @@ const TestPage = () => {
   return (
     <PageContainer title="TestPage" description="This is TestPage">
       <Box pt="3rem">
-        <Grid container spacing={3}>
-          <Grid item xs={12} md={7} lg={7}>
-            <BlankCard>
-              <Box
-                width="100%"
-                minHeight="400px"
-                boxShadow={3}
-                display="flex"
-                flexDirection="column"
-                alignItems="center"
-                justifyContent="center"
-              >
-                {isLoading ? (
-                  <CircularProgress />
-                ) : !data || data.length === 0 ? (
-                  <Box textAlign="center" p={3}>
-                    <p>No questions found for this exam.</p>
-                  </Box>
-                ) : (
-                  <MultipleChoiceQuestion
-                    submitTest={isMcqCompleted ? handleTestSubmission : handleMcqCompletion}
-                    questions={data}
-                    saveUserTestScore={saveUserTestScore}
-                  />
-                )}
-              </Box>
-            </BlankCard>
-          </Grid>
-          <Grid item xs={12} md={5} lg={5}>
-            <Grid container spacing={3}>
-              <Grid item xs={12}>
-                <BlankCard>
-                  <Box
-                    maxHeight="300px"
-                    sx={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'start',
-                      justifyContent: 'center',
-                      overflowY: 'auto',
-                      height: '100%',
-                    }}
-                  >
+        {/* ✅ START EXAM BUTTON (ADDED – REQUIRED FOR FULLSCREEN) */}
+        {!isExamStarted && (
+          <Box textAlign="center" mb={2}>
+            <button
+              onClick={async () => {
+                await document.documentElement.requestFullscreen();
+                setIsExamStarted(true);
+              }}
+            >
+              Start Exam
+            </button>
+          </Box>
+        )}
+
+        {isExamStarted && (
+          <Grid container spacing={3}>
+            <Grid item xs={12} md={7} lg={7}>
+              <BlankCard>
+                <Box minHeight="400px" display="flex" justifyContent="center">
+                  {isLoading ? (
+                    <CircularProgress />
+                  ) : (
+                    <MultipleChoiceQuestion
+                      submitTest={isMcqCompleted ? handleTestSubmission : handleMcqCompletion}
+                      questions={data}
+                      saveUserTestScore={saveUserTestScore}
+                    />
+                  )}
+                </Box>
+              </BlankCard>
+            </Grid>
+
+            <Grid item xs={12} md={5} lg={5}>
+              <Grid container spacing={3}>
+                <Grid item xs={12}>
+                  <BlankCard>
                     <NumberOfQuestions
                       questionLength={questions.length}
                       submitTest={isMcqCompleted ? handleTestSubmission : handleMcqCompletion}
                       examDurationInSeconds={examDurationInSeconds}
                     />
-                  </Box>
-                </BlankCard>
-              </Grid>
-              <Grid item xs={12}>
-                <BlankCard>
-                  <Box
-                    width="300px"
-                    maxHeight="180px"
-                    boxShadow={3}
-                    display="flex"
-                    flexDirection="column"
-                    alignItems="start"
-                    justifyContent="center"
-                  >
-                    <WebCam cheatingLog={cheatingLog} updateCheatingLog={updateCheatingLog} />
-                  </Box>
-                </BlankCard>
+                  </BlankCard>
+                </Grid>
+
+                <Grid item xs={12}>
+                  <BlankCard>
+                    <WebCam
+                      cheatingLog={cheatingLog}
+                      updateCheatingLog={updateCheatingLog}
+                    />
+                  </BlankCard>
+                </Grid>
               </Grid>
             </Grid>
           </Grid>
-        </Grid>
+        )}
       </Box>
     </PageContainer>
   );

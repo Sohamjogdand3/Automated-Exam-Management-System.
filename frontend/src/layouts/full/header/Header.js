@@ -54,22 +54,7 @@ const Header = (props) => {
           <IconMenu width="20" height="20" />
         </IconButton>
 
-        <IconButton
-          size="large"
-          aria-label="show 11 new notifications"
-          color="inherit"
-          aria-controls="msgs-menu"
-          aria-haspopup="true"
-          sx={{
-            ...(typeof anchorEl2 === 'object' && {
-              color: 'primary.main',
-            }),
-          }}
-        >
-          <Badge variant="dot" color="primary">
-            <IconBellRinging size="21" stroke="1.5" />
-          </Badge>
-        </IconButton>
+        
         <Box flexGrow={1} />
         <Stack spacing={1} direction="row" alignItems="center">
           <Typography variant="contained" color="primary">
